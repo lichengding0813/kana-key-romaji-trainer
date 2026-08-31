@@ -4,12 +4,24 @@ export type Vocab = {
   roma: string;
   zh: string;
   alts?: string[];
+  exampleJa?: string;
+  exampleZh?: string;
+};
+
+export type GrammarPoint = {
+  title: string;
+  pattern: string;
+  explanation: string;
+  exampleJa?: string;
+  exampleZh?: string;
 };
 
 export type Lesson = {
   id: number;
   title: string;
   words: Vocab[];
+  grammar?: GrammarPoint[];
+  source?: "builtin" | "imported";
 };
 
 export const lessons: Lesson[] = [
@@ -17,18 +29,24 @@ export const lessons: Lesson[] = [
     id: 1,
     title: "李さんは中国人です",
     words: [
-      { jp: "中国人", kana: "ちゅうごくじん", roma: "chuugokujin", zh: "中国人", alts: ["tyuugokujin"] },
+      { jp: "中国人", kana: "ちゅうごくじん", roma: "chuugokujin", zh: "中国人", alts: ["tyuugokujin"], exampleJa: "李さんは中国人です。", exampleZh: "小李是中国人。" },
       { jp: "日本人", kana: "にほんじん", roma: "nihonjin", zh: "日本人" },
       { jp: "韓国人", kana: "かんこくじん", roma: "kankokujin", zh: "韩国人" },
-      { jp: "学生", kana: "がくせい", roma: "gakusei", zh: "学生" },
+      { jp: "学生", kana: "がくせい", roma: "gakusei", zh: "学生", exampleJa: "私は学生です。", exampleZh: "我是学生。" },
       { jp: "先生", kana: "せんせい", roma: "sensei", zh: "老师" },
       { jp: "留学生", kana: "りゅうがくせい", roma: "ryuugakusei", zh: "留学生" },
       { jp: "教授", kana: "きょうじゅ", roma: "kyouju", zh: "教授" },
       { jp: "社員", kana: "しゃいん", roma: "shain", zh: "职员" },
-      { jp: "会社員", kana: "かいしゃいん", roma: "kaishain", zh: "公司职员" },
+      { jp: "会社員", kana: "かいしゃいん", roma: "kaishain", zh: "公司职员", exampleJa: "私は会社員です。", exampleZh: "我是公司职员。" },
       { jp: "店員", kana: "てんいん", roma: "tenin", zh: "店员" },
       { jp: "研修生", kana: "けんしゅうせい", roma: "kenshuusei", zh: "进修生" },
-      { jp: "大学", kana: "だいがく", roma: "daigaku", zh: "大学" },
+      { jp: "大学", kana: "だいがく", roma: "daigaku", zh: "大学", exampleJa: "王さんは北京大学の学生です。", exampleZh: "小王是北京大学的学生。" },
+    ],
+    grammar: [
+      { title: "判断句", pattern: "A は B です", explanation: "表示“A是B”。主题助词「は」在这里读作 wa。", exampleJa: "李さんは中国人です。", exampleZh: "小李是中国人。" },
+      { title: "否定句", pattern: "A は B ではありません", explanation: "表示“A不是B”，是「です」的礼貌否定形式。", exampleJa: "私は小学生ではありません。", exampleZh: "我不是小学生。" },
+      { title: "疑问句", pattern: "A は B ですか", explanation: "句末加「か」构成疑问句；回答通常用「はい／いいえ」。", exampleJa: "森さんは学生ですか。", exampleZh: "森先生是学生吗？" },
+      { title: "所属与修饰", pattern: "A の B", explanation: "助词「の」连接两个名词，可表示所属、属性或类别。", exampleJa: "王さんは北京大学の学生です。", exampleZh: "小王是北京大学的学生。" },
     ],
   },
   {
