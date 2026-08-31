@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import Trainer from "./trainer";
 
 export const metadata: Metadata = {
-  title: "かなキー｜新标日日语输入练习",
-  description: "按《新标准日本语》课次练习词汇、假名与罗马音输入。",
+  title: "かなキー｜五十音、单词与语法训练",
+  description: "练习五十音输入，并按《新标准日本语》课次记忆单词、阅读语法辨析与例句。",
 };
 
 export default function Home() {
