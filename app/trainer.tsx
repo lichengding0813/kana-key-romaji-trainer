@@ -2,8 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
-import { parseImportedDocx } from "./docx-import";
+import { parseImportedSpreadsheets } from "./spreadsheet-import";
 import { kanaEntries } from "./kana";
+import type { KanaEntry, KanaGroup } from "./kana";
 import { lessons as builtInLessons } from "./lessons";
 import type { Lesson, Vocab } from "./lessons";
 
@@ -11,6 +12,7 @@ type Result = "correct" | "incorrect" | null;
 type OpenPanel = "import" | "history" | null;
 type MainTab = "kana" | "vocab" | "grammar";
 type KanaScript = "hiragana" | "katakana" | "mixed";
+type KanaQuestionType = "input" | "choice";
 
 type HistoryRecord = {
   id: string;
@@ -94,16 +96,41 @@ function kanaScriptLabel(script: KanaScript) {
   return "平假名与片假名混合";
 }
 
-function acceptedKanaRomaji(romaji: string) {
-  const alternatives: Record<string, string[]> = {
-    shi: ["si"],
-    chi: ["ti"],
-    tsu: ["tu"],
-    fu: ["hu"],
-    wo: ["o"],
-    n: ["nn", "n'"],
-  };
-  return [romaji, ...(alternatives[romaji] ?? [])];
+function acceptedKanaRomaji(kana: KanaEntry) {
+  return [kana.romaji, ...(kana.alternatives ?? [])];
+}
+
+function shuffled<T>(items: T[]) {
+  const copy = [...items];
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
+  }
+  return copy;
+}
+
+function kanaChoices(target: KanaEntry, pool: KanaEntry[]) {
+  const distractors = shuffled(Array.from(new Set(pool.map((item) => item.romaji).filter((romaji) => romaji !== target.romaji)))).slice(0, 3);
+  return shuffled([target.romaji, ...distractors]);
+}
+
+function mergeImportedLessons(current: Lesson[], incoming: Lesson[]) {
+  const merged = new Map(current.map((lesson) => [lesson.id, lesson]));
+  for (const lesson of incoming) {
+    const existing = merged.get(lesson.id) ?? builtInLessons.find((item) => item.id === lesson.id);
+    const words = lesson.words.length ? lesson.words : existing?.words ?? [];
+    if (!words.length) {
+      throw new Error(`第 ${lesson.id} 课只有语法，没有对应词汇。请同时导入该课词汇表。`);
+    }
+    merged.set(lesson.id, {
+      id: lesson.id,
+      title: lesson.title || existing?.title || `第 ${lesson.id} 课自定义题库`,
+      words,
+      grammar: lesson.grammar?.length ? lesson.grammar : existing?.grammar ?? [],
+      source: "imported",
+    });
+  }
+  return Array.from(merged.values()).sort((a, b) => a.id - b.id);
 }
 
 export default function Trainer() {
@@ -113,9 +140,15 @@ export default function Trainer() {
   const [wordIndex, setWordIndex] = useState(0);
   const [answer, setAnswer] = useState("");
   const [result, setResult] = useState<Result>(null);
+  const [kanaGroups, setKanaGroups] = useState<KanaGroup[]>(["清音", "浊音", "半浊音", "拗音"]);
+  const [kanaQuestionType, setKanaQuestionType] = useState<KanaQuestionType>("input");
+  const [kanaShuffle, setKanaShuffle] = useState(false);
+  const [kanaSequence, setKanaSequence] = useState<KanaEntry[]>(kanaEntries);
   const [kanaIndex, setKanaIndex] = useState(0);
   const [kanaScript, setKanaScript] = useState<KanaScript>("hiragana");
   const [kanaAnswer, setKanaAnswer] = useState("");
+  const [selectedKanaChoice, setSelectedKanaChoice] = useState("");
+  const [kanaChoiceOptions, setKanaChoiceOptions] = useState(["a", "i", "u", "e"]);
   const [kanaResult, setKanaResult] = useState<Result>(null);
   const [attempts, setAttempts] = useState(0);
   const [correct, setCorrect] = useState(0);
@@ -136,11 +169,11 @@ export default function Trainer() {
   const word = lesson.words[wordIndex] ?? lesson.words[0];
   const progress = ((wordIndex + 1) / lesson.words.length) * 100;
   const tokens = useMemo(() => splitRomaji(word.roma), [word.roma]);
-  const kana = kanaEntries[kanaIndex];
+  const kana = kanaSequence[kanaIndex] ?? kanaSequence[0] ?? kanaEntries[0];
   const kanaTargetScript = kanaScript === "mixed" ? (kanaIndex % 2 === 0 ? "hiragana" : "katakana") : kanaScript;
   const kanaPrompt = kanaTargetScript === "hiragana" ? kana.hiragana : toKatakana(kana.hiragana);
-  const kanaRomajiAnswers = acceptedKanaRomaji(kana.romaji);
-  const kanaProgress = ((kanaIndex + 1) / kanaEntries.length) * 100;
+  const kanaRomajiAnswers = acceptedKanaRomaji(kana);
+  const kanaProgress = ((kanaIndex + 1) / kanaSequence.length) * 100;
 
   useEffect(() => {
     const hydrationTask = window.setTimeout(() => {
@@ -155,8 +188,8 @@ export default function Trainer() {
 
   useEffect(() => {
     if (activeTab === "vocab") inputRef.current?.focus();
-    if (activeTab === "kana") kanaInputRef.current?.focus();
-  }, [activeTab, selectedLesson, wordIndex, kanaIndex, kanaScript]);
+    if (activeTab === "kana" && kanaQuestionType === "input") kanaInputRef.current?.focus();
+  }, [activeTab, selectedLesson, wordIndex, kanaIndex, kanaScript, kanaQuestionType]);
 
   useEffect(() => {
     if (!openPanel) return;
@@ -211,6 +244,25 @@ export default function Trainer() {
     });
   }
 
+  function gradeKana(value: string) {
+    const normalized = strip(value.normalize("NFKC"));
+    const normalizedKana = toHiragana(value);
+    const ok = kanaRomajiAnswers.includes(normalized) || normalizedKana === kana.hiragana;
+    setKanaAnswer(value);
+    setKanaResult(ok ? "correct" : "incorrect");
+    recordOutcome(ok);
+    saveHistory({
+      id: createHistoryId(),
+      timestamp: currentTimestamp(),
+      category: "kana",
+      lessonTitle: `五十音 · ${kanaScriptLabel(kanaScript)}`,
+      word: kana.romaji,
+      meaning: kanaPrompt,
+      answer: value.trim(),
+      correct: ok,
+    });
+  }
+
   function submitKana(event: FormEvent) {
     event.preventDefault();
     if (kanaResult) {
@@ -221,20 +273,13 @@ export default function Trainer() {
       kanaInputRef.current?.focus();
       return;
     }
-    const normalized = strip(kanaAnswer.normalize("NFKC"));
-    const ok = kanaRomajiAnswers.includes(normalized);
-    setKanaResult(ok ? "correct" : "incorrect");
-    recordOutcome(ok);
-    saveHistory({
-      id: createHistoryId(),
-      timestamp: currentTimestamp(),
-      category: "kana",
-      lessonTitle: `五十音 · ${kanaScriptLabel(kanaScript)}`,
-      word: kana.romaji,
-      meaning: kanaPrompt,
-      answer: kanaAnswer.trim(),
-      correct: ok,
-    });
+    gradeKana(kanaAnswer);
+  }
+
+  function chooseKana(value: string) {
+    if (kanaResult) return;
+    setSelectedKanaChoice(value);
+    gradeKana(value);
   }
 
   function nextWord() {
@@ -244,8 +289,19 @@ export default function Trainer() {
   }
 
   function nextKana() {
-    setKanaIndex((value) => (value + 1) % kanaEntries.length);
+    let nextSequence = kanaSequence;
+    let nextIndex = kanaIndex + 1;
+    if (nextIndex >= kanaSequence.length) {
+      nextIndex = 0;
+      if (kanaShuffle) {
+        nextSequence = shuffled(kanaSequence);
+        setKanaSequence(nextSequence);
+      }
+    }
+    setKanaIndex(nextIndex);
+    setKanaChoiceOptions(kanaChoices(nextSequence[nextIndex], nextSequence));
     setKanaAnswer("");
+    setSelectedKanaChoice("");
     setKanaResult(null);
   }
 
@@ -256,33 +312,61 @@ export default function Trainer() {
     setResult(null);
   }
 
-  function changeKanaScript(value: KanaScript) {
-    setKanaScript(value);
+  function resetKanaRun(options?: { groups?: KanaGroup[]; shuffled?: boolean; questionType?: KanaQuestionType }) {
+    const groups = options?.groups ?? kanaGroups;
+    const shouldShuffle = options?.shuffled ?? kanaShuffle;
+    const pool = kanaEntries.filter((entry) => groups.includes(entry.group));
+    const sequence = shouldShuffle ? shuffled(pool) : pool;
+    setKanaSequence(sequence);
     setKanaIndex(0);
+    setKanaChoiceOptions(kanaChoices(sequence[0], sequence));
     setKanaAnswer("");
+    setSelectedKanaChoice("");
     setKanaResult(null);
+    if (options?.questionType) setKanaQuestionType(options.questionType);
   }
 
-  async function importDocx(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  function changeKanaScript(value: KanaScript) {
+    setKanaScript(value);
+    resetKanaRun();
+  }
+
+  function toggleKanaGroup(group: KanaGroup) {
+    const selected = kanaGroups.includes(group);
+    if (selected && kanaGroups.length === 1) return;
+    const nextGroups = selected ? kanaGroups.filter((item) => item !== group) : [...kanaGroups, group];
+    setKanaGroups(nextGroups);
+    resetKanaRun({ groups: nextGroups });
+  }
+
+  function changeKanaQuestionType(value: KanaQuestionType) {
+    resetKanaRun({ questionType: value });
+  }
+
+  function toggleKanaShuffle() {
+    const next = !kanaShuffle;
+    setKanaShuffle(next);
+    resetKanaRun({ shuffled: next });
+  }
+
+  async function importSpreadsheets(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
     setIsImporting(true);
     setImportMessage("");
     setImportError("");
     try {
-      const bank = await parseImportedDocx(file);
-      setImportedLessons((current) => {
-        const lessonIds = new Set(bank.lessons.map((item) => item.id));
-        const next = [...current.filter((item) => !lessonIds.has(item.id)), ...bank.lessons].sort((a, b) => a.id - b.id);
-        localStorage.setItem(IMPORTED_LESSONS_KEY, JSON.stringify(next));
-        return next;
-      });
-      setSelectedLesson(lessonKey(bank.lessons[0]));
-      setActiveTab("vocab");
+      const bank = await parseImportedSpreadsheets(files);
+      const next = mergeImportedLessons(importedLessons, bank.lessons);
+      setImportedLessons(next);
+      localStorage.setItem(IMPORTED_LESSONS_KEY, JSON.stringify(next));
+      const firstImported = next.find((item) => item.id === bank.lessons[0].id) ?? next[0];
+      setSelectedLesson(lessonKey(firstImported));
+      setActiveTab(bank.vocabularyCount ? "vocab" : "grammar");
       setWordIndex(0);
       setAnswer("");
       setResult(null);
-      setImportMessage(`已导入 ${bank.lessons.length} 课、${bank.vocabularyCount} 个词汇、${bank.grammarCount} 条语法。`);
+      setImportMessage(`已导入 ${bank.lessons.length} 课、${bank.vocabularyCount} 个词汇、${bank.grammarCount} 条语法。支持继续导入同课次的另一张表。`);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : "导入失败，请检查文件格式。");
     } finally {
@@ -300,7 +384,6 @@ export default function Trainer() {
           <span className="brand-mark" aria-hidden="true">あ</span>
           <span>
             <strong>かなキー</strong>
-            <small>日语输入与词汇练习</small>
           </span>
         </a>
         <div className="top-actions">
@@ -315,25 +398,23 @@ export default function Trainer() {
 
       <div className="primary-tabs" role="tablist" aria-label="训练模式">
         <button type="button" role="tab" aria-selected={activeTab === "kana"} aria-controls="kana-panel" onClick={() => setActiveTab("kana")}>
-          <span>五十音训练</span><small>基础假名</small>
+          <span>五十音训练</span>
         </button>
         <button type="button" role="tab" aria-selected={activeTab === "vocab"} aria-controls="vocab-panel" onClick={() => setActiveTab("vocab")}>
-          <span>单词记忆</span><small>输入练习</small>
+          <span>单词记忆</span>
         </button>
         <button type="button" role="tab" aria-selected={activeTab === "grammar"} aria-controls="grammar-panel" onClick={() => setActiveTab("grammar")}>
-          <span>语法辨析</span><small>句型与例句</small>
+          <span>语法辨析</span>
         </button>
       </div>
 
       <section className="lesson-bar" aria-label={activeTab === "kana" ? "假名类型选择" : "课程选择"}>
         {activeTab === "kana" ? (
           <div>
-            <p>基础 46 音 · 罗马音键盘</p>
             <h1>五十音 · {kanaScriptLabel(kanaScript)}</h1>
           </div>
         ) : (
           <div>
-            <p>{lesson.source === "imported" ? "本机导入题库" : "初级上册 · 第 1–8 课"}</p>
             <h1>第 {String(lesson.id).padStart(2, "0")} 课 · {lesson.title}</h1>
           </div>
         )}
@@ -369,9 +450,29 @@ export default function Trainer() {
 
       {activeTab === "kana" && (
         <section className="practice-wrap" id="kana-panel" role="tabpanel">
+          <div className="kana-toolbar" aria-label="五十音训练设置">
+            <div className="kana-control-group">
+              <span>题型</span>
+              <div className="compact-toggle">
+                <button type="button" aria-pressed={kanaQuestionType === "input"} onClick={() => changeKanaQuestionType("input")}>输入罗马音</button>
+                <button type="button" aria-pressed={kanaQuestionType === "choice"} onClick={() => changeKanaQuestionType("choice")}>选择罗马音</button>
+              </div>
+            </div>
+            <div className="kana-control-group kana-group-filter">
+              <span>音类</span>
+              <div>
+                {(["清音", "浊音", "半浊音", "拗音"] as KanaGroup[]).map((group) => (
+                  <button key={group} type="button" aria-pressed={kanaGroups.includes(group)} onClick={() => toggleKanaGroup(group)}>{group}</button>
+                ))}
+              </div>
+            </div>
+            <button className="shuffle-toggle" type="button" aria-pressed={kanaShuffle} onClick={toggleKanaShuffle}>
+              <span aria-hidden="true">↝</span>{kanaShuffle ? "随机：开" : "随机：关"}
+            </button>
+          </div>
           <div className="question-meta">
-            <span>假名 {kanaIndex + 1} / {kanaEntries.length} · {kana.row}</span>
-            <span>辨认屏幕上的假名，用英文字母输入罗马音</span>
+            <span>假名 {kanaIndex + 1} / {kanaSequence.length} · {kana.group} · {kana.row}</span>
+            <span>{kanaQuestionType === "input" ? "输入罗马音、平假名或片假名" : "选择与假名对应的罗马音"}</span>
           </div>
           <div className="progress-track" role="progressbar" aria-label="五十音进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(kanaProgress)}>
             <span style={{ width: `${kanaProgress}%` }} />
@@ -380,26 +481,37 @@ export default function Trainer() {
           <div className="practice-grid kana-practice-grid">
             <article className={`practice-card ${kanaResult ? `answered ${kanaResult}` : ""}`}>
               <div className="question-copy">
-                <p className="eyebrow">请写出这个{kanaTargetScript === "hiragana" ? "平假名" : "片假名"}的罗马音</p>
+                <p className="eyebrow">{kanaQuestionType === "input" ? "输入对应的罗马音或假名" : "选择正确的罗马音"}</p>
                 <h2 className="kana-prompt" lang="ja">{kanaPrompt}</h2>
-                <p className="prompt-note">直接使用英文字母键盘作答</p>
               </div>
-              <form className="answer-form" onSubmit={submitKana}>
-                <label htmlFor="kana-answer">罗马音答案</label>
-                <div className="answer-row">
-                  <input
-                    ref={kanaInputRef}
-                    id="kana-answer"
-                    value={kanaAnswer}
-                    onChange={(event) => !kanaResult && setKanaAnswer(event.target.value)}
-                    autoComplete="off"
-                    autoCapitalize="none"
-                    spellCheck={false}
-                    aria-describedby={kanaResult ? "kana-answer-status" : undefined}
-                  />
-                  <button type="submit">{kanaResult ? "下一题" : "确认"}</button>
+              {kanaQuestionType === "input" ? (
+                <form className="answer-form" onSubmit={submitKana}>
+                  <label htmlFor="kana-answer">答案</label>
+                  <div className="answer-row">
+                    <input
+                      ref={kanaInputRef}
+                      id="kana-answer"
+                      value={kanaAnswer}
+                      onChange={(event) => !kanaResult && setKanaAnswer(event.target.value)}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      aria-describedby={kanaResult ? "kana-answer-status" : undefined}
+                    />
+                    <button type="submit">{kanaResult ? "下一题" : "确认"}</button>
+                  </div>
+                </form>
+              ) : (
+                <div className="kana-choice-wrap">
+                  <div className="kana-choice-grid" role="group" aria-label="罗马音选项">
+                    {kanaChoiceOptions.map((option) => {
+                      const state = kanaResult ? (option === kana.romaji ? "correct" : option === selectedKanaChoice ? "incorrect" : "") : "";
+                      return <button key={option} className={state} type="button" aria-pressed={selectedKanaChoice === option} disabled={Boolean(kanaResult)} onClick={() => chooseKana(option)}>{option}</button>;
+                    })}
+                  </div>
+                  {kanaResult && <button className="choice-next" type="button" onClick={nextKana}>下一题</button>}
                 </div>
-              </form>
+              )}
               {kanaResult && (
                 <p className={`answer-status ${kanaResult}`} id="kana-answer-status" role="status">
                   {kanaResult === "correct" ? "回答正确" : `你的答案：${kanaAnswer}`}
@@ -410,7 +522,7 @@ export default function Trainer() {
             {!kanaResult ? (
               <section className="analysis-locked" aria-label="五十音答案尚未显示">
                 <span aria-hidden="true">あ</span>
-                <div><strong>作答后显示罗马音</strong><p>会同时展示标准写法和常用输入法写法。</p></div>
+                <div><strong>作答后显示答案</strong></div>
               </section>
             ) : (
               <section className="analysis-panel kana-answer-panel" aria-label="五十音答案">
@@ -424,13 +536,12 @@ export default function Trainer() {
                   <div><dt>罗马音按键</dt><dd>{kana.romaji}</dd></div>
                 </dl>
                 <div className="kana-coach">
-                  <span>输入提示</span>
-                  <p>标准写法是 <code>{kana.romaji}</code>{kanaRomajiAnswers.length > 1 ? `；也接受 ${kanaRomajiAnswers.slice(1).join(" / ")}。` : "。"}切换“混合”可以交替辨认平假名和片假名。</p>
+                  <span>可接受答案</span>
+                  <p><code>{kana.romaji}</code>{kanaRomajiAnswers.length > 1 ? `、${kanaRomajiAnswers.slice(1).join("、")}` : ""}、{kana.hiragana}、{toKatakana(kana.hiragana)}</p>
                 </div>
               </section>
             )}
           </div>
-          <footer className="source-note">五十音训练包含 46 个基础清音，平假名、片假名和混合模式共用本轮成绩。</footer>
         </section>
       )}
 
@@ -476,7 +587,7 @@ export default function Trainer() {
             {!result ? (
               <section className="analysis-locked" aria-label="答案解析尚未显示">
                 <span aria-hidden="true">解</span>
-                <div><strong>提交后显示答案与解析</strong><p>作答前不会显示假名、罗马音或例句。</p></div>
+                <div><strong>提交后显示答案与解析</strong></div>
               </section>
             ) : (
               <section className="analysis-panel" aria-label="答案解析">
@@ -506,7 +617,7 @@ export default function Trainer() {
               </section>
             )}
           </div>
-          <footer className="source-note">导入的题库和答题记录仅保存在当前浏览器；语法内容请在“语法辨析”标签页查看。</footer>
+          <footer className="source-note">导入题库和答题记录仅保存在当前浏览器。</footer>
         </section>
       )}
 
@@ -514,7 +625,6 @@ export default function Trainer() {
         <section className="grammar-page" id="grammar-panel" role="tabpanel">
           <header className="grammar-page-header">
             <div><span>本课语法</span><strong>{lesson.grammar?.length ?? 0}</strong><small>条辨析</small></div>
-            <p>句型、用法和例句集中在这里阅读，不再重复出现在每道单词解析里。</p>
           </header>
           {lesson.grammar?.length ? (
             <div className="grammar-study-grid">
@@ -540,7 +650,7 @@ export default function Trainer() {
             <div className="grammar-empty">
               <span aria-hidden="true">文</span>
               <h2>本课还没有语法辨析</h2>
-              <p>可在 Word 导入模板的“语法辨析表”中填写句型、说明和例句，再重新导入题库。</p>
+              <p>可在表格模板的“语法辨析”工作表中填写后导入。</p>
               <button type="button" onClick={() => setOpenPanel("import")}>导入含语法的题库</button>
             </div>
           )}
@@ -551,13 +661,16 @@ export default function Trainer() {
         <div className="modal-backdrop">
           <section className="modal" role="dialog" aria-modal="true" aria-labelledby="import-title">
             <button className="modal-close" type="button" aria-label="关闭" onClick={() => setOpenPanel(null)}>×</button>
-            <p className="modal-kicker">WORD · DOCX</p>
             <h2 id="import-title">导入我的题库</h2>
-            <p className="modal-copy">下载模板后填写词汇表；例句和语法辨析为选填。同课次再次导入时，会替换该课之前的导入版本。</p>
-            <a className="template-link" href="/kana-key-import-template.docx" download>下载 Word 导入模板</a>
+            <p className="modal-copy">XLSX 可同时填写词汇和语法；CSV 可一次选择多个文件。同课次内容会自动合并。</p>
+            <div className="template-links">
+              <a className="template-link" href="/kana-key-import-template.xlsx" download>下载 XLSX 模板</a>
+              <a className="template-link secondary" href="/kana-key-vocabulary-template.csv" download>词汇 CSV</a>
+              <a className="template-link secondary" href="/kana-key-grammar-template.csv" download>语法 CSV</a>
+            </div>
             <label className={`upload-zone ${isImporting ? "busy" : ""}`}>
-              <input type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={importDocx} disabled={isImporting} />
-              <strong>{isImporting ? "正在读取…" : "选择填写好的 DOCX"}</strong>
+              <input type="file" multiple accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={importSpreadsheets} disabled={isImporting} />
+              <strong>{isImporting ? "正在读取…" : "选择 XLSX 或 CSV"}</strong>
               <span>文件在浏览器中解析，不会上传到服务器</span>
             </label>
             {importMessage && <p className="modal-message success" role="status">{importMessage}</p>}
@@ -570,7 +683,6 @@ export default function Trainer() {
         <div className="modal-backdrop">
           <section className="modal history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
             <button className="modal-close" type="button" aria-label="关闭" onClick={() => setOpenPanel(null)}>×</button>
-            <p className="modal-kicker">LOCAL HISTORY</p>
             <h2 id="history-title">答题记录</h2>
             <div className="history-summary">
               <span><b>{history.length}</b> 次作答</span>
